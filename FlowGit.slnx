@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FlowGit.API/FlowGit.API.csproj" />
+  </Folder>
+</Solution>
