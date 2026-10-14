@@ -1,32 +1,52 @@
-
+using FlowGit.API.Data;
 using FlowGit.API.Entities;
+using FlowGit.API.Models;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace FlowGit.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class ProductsController : ControllerBase
+public class ProductsController(AppDbContext db) : ControllerBase
 {
-    private static readonly List<Product> Products =
-    [
-        new() { Id = 1, Name = "Bàn phím cơ", Price = 1_290_000m, Quantity = 15 },
-        new() { Id = 2, Name = "Chuột không dây", Price = 450_000m, Quantity = 30 },
-        new() { Id = 3, Name = "Màn hình 27 inch", Price = 5_490_000m, Quantity = 8 }
-    ];
-
-    private static int _nextId = 4;
-
     [HttpGet]
-    public ActionResult<IEnumerable<Product>> GetAll()
+    public async Task<ActionResult<PagedResult<Product>>> GetAll(
+        [FromQuery] string? search,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10,
+        CancellationToken cancellationToken = default)
     {
-        return Ok(Products);
+        page = page < 1 ? 1 : page;
+        pageSize = pageSize is < 1 or > 50 ? 10 : pageSize;
+
+        var query = db.Products.AsNoTracking();
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            foreach (var term in search.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var pattern = $"%{EscapeLike(TextSearch.Normalize(term))}%";
+                query = query.Where(p => EF.Functions.Like(EF.Property<string>(p, "NameSearch"), pattern));
+            }
+        }
+
+        var totalCount = await query.CountAsync(cancellationToken);
+        var items = await query
+            .OrderBy(p => p.Name)
+            .ThenBy(p => p.Id)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync(cancellationToken);
+
+        return Ok(new PagedResult<Product>(items, page, pageSize, totalCount));
     }
 
     [HttpGet("{id:int}")]
-    public ActionResult<Product> GetById(int id)
+    public async Task<ActionResult<Product>> GetById(int id, CancellationToken cancellationToken)
     {
-        var product = Products.FirstOrDefault(p => p.Id == id);
+        var product = await db.Products.AsNoTracking()
+            .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
         if (product is null)
             return NotFound();
@@ -35,56 +55,60 @@ public class ProductsController : ControllerBase
     }
 
     [HttpPost]
-    public ActionResult<Product> Create(Product product)
+    public async Task<ActionResult<Product>> Create(Product product, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(product.Name)
-            || product.Price < 0
-            || product.Quantity < 0)
-        {
+        if (!IsValid(product))
             return BadRequest("Invalid product information.");
-        }
 
-        product.Id = _nextId++;
-        Products.Add(product);
+        product.Id = 0;
+        db.Products.Add(product);
+        db.Entry(product).Property("NameSearch").CurrentValue = TextSearch.Normalize(product.Name);
+        await db.SaveChangesAsync(cancellationToken);
 
-        return CreatedAtAction(
-            nameof(GetById),
-            new { id = product.Id },
-            product);
+        return CreatedAtAction(nameof(GetById), new { id = product.Id }, product);
     }
 
     [HttpPut("{id:int}")]
-    public IActionResult Update(int id, Product input)
+    public async Task<IActionResult> Update(int id, Product input, CancellationToken cancellationToken)
     {
-        var product = Products.FirstOrDefault(p => p.Id == id);
+        var product = await db.Products.FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
         if (product is null)
             return NotFound();
 
-        if (string.IsNullOrWhiteSpace(input.Name)
-            || input.Price < 0
-            || input.Quantity < 0)
-        {
+        if (!IsValid(input))
             return BadRequest("Invalid product information.");
-        }
 
         product.Name = input.Name;
         product.Price = input.Price;
         product.Quantity = input.Quantity;
+        db.Entry(product).Property("NameSearch").CurrentValue = TextSearch.Normalize(input.Name);
+        await db.SaveChangesAsync(cancellationToken);
 
         return NoContent();
     }
 
     [HttpDelete("{id:int}")]
-    public IActionResult Delete(int id)
+    public async Task<IActionResult> Delete(int id, CancellationToken cancellationToken)
     {
-        var product = Products.FirstOrDefault(p => p.Id == id);
+        var product = await db.Products.FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
         if (product is null)
             return NotFound();
 
-        Products.Remove(product);
+        db.Products.Remove(product);
+        await db.SaveChangesAsync(cancellationToken);
 
         return NoContent();
     }
+
+    private static bool IsValid(Product product) =>
+        !string.IsNullOrWhiteSpace(product.Name)
+        && product.Price >= 0
+        && product.Quantity >= 0;
+
+    private static string EscapeLike(string value) =>
+        value.Replace("[", "[[]", StringComparison.Ordinal)
+            .Replace("%", "[%]", StringComparison.Ordinal)
+            .Replace("_", "[_]", StringComparison.Ordinal);
 }
